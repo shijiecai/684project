@@ -1,0 +1,327 @@
+---
+title: "Allstate Purchase Prediction"
+author: "Shijie Cai"
+date: "2017/12/12"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(out.width="0.9\\linewidth",dev="png",fig.align  = 'center',echo = F)
+pacman::p_load(
+ggplot2,
+knitr,
+arm,
+data.table,
+foreign,
+gridExtra,
+car,
+stringr,
+rstan,
+rstanarm,
+zoo,
+dplyr,
+reshape2
+)
+```
+
+\textbf{\LARGE{1. Project Description}} 
+
+\vspace{5mm}
+\textbf{\Large{1.1-Overview}}
+\vspace{5mm}
+
+In this project, I use Allstate car insurance dataset. There are in total over 660000 observarions in train dataset and 190000 observations in test dataset, and each observation represent a collection of customers. My goal for this project is to predict will the customer purchase the insurance plan by fitting a model (By using a new dataset by extracting shopping points). Coverage options are contained in the last fewer rows, details will be showed as following.
+
+\vspace{5mm}
+\textbf{\Large{1.2-Data Description}}
+\newline
+\vspace{5mm}
+
+Customer: Each customer has many shopping points, where a shopping point is defined by a customer with certain characteristics viewing a product and its associated cost at a particular time. Each customer represents a collection of people, not individual. 
+
+Product Options :Each product has 7 options selected by customers, each with 2, 3, or 4 ordinal values possible.
+
+record_type - 0=shopping point, 1=purchase point(puchase points are missing in the test set). Which indicates that 1 means the customer makes the purchase and 0 means otherwise.
+
+
+Variable Descriptions:\newline customer_ID - A unique identifier for the customer\newline shopping_pt - Unique identifier for the shopping point of a given customer\newline day - Day of the week (0-6, 0=Monday)\newline time - Time of day (HH:MM)\newline state - State where shopping point occurred\newline location - Location ID where shopping point occurred\newline group_size - How many people will be covered under the policy (1, 2, 3 or 4)\newline homeowner - Whether the customer owns a home or not (0=no, 1=yes)\newline car_age - Age of the customer???s car\newline car_value - How valuable was the customer's car when new(categorized with 7 levels a~g)\newline risk_factor - An ordinal assessment of how risky the customer is (1, 2, 3, 4)\newline age_oldest - Age of the oldest person in customer's group\newline age_youngest - Age of the youngest person in customer's group\newline married_couple - Does the customer group contain a married couple (0=no, 1=yes)\newline C_previous - What the customer formerly had or currently has for product option C (0=nothing, 1, 2, 3,4)\newline duration_previous -  how long (in years) the customer was covered by their previous issuer\newline A,B,C,D,E,F,G - the coverage options\newline cost - cost of the quoted coverage options
+
+\vspace{5mm}
+\textbf{\Large{1.3-Research Question}}
+\newline
+\vspace{5mm}
+1. Is there a model to predict whether the customers will purchase or not?
+
+
+\vspace{5mm}
+\textbf{\LARGE{2. Method}}
+\vspace{5mm}
+\newline
+\textbf{\Large{2.1-Model Selection}}
+\vspace{5mm}
+
+Model will be fit in multilevel function. My thought is a customer will choose a plan based on the information of himself such as : group size, car age, his risk and etc, which in the other words, wether the plan fits his situation is key point, so I think the only latent factors need to be considered here are C_previous(which option C the customer had in the previous) and duration_previous. I didn't contain any interactions in the model at first, but interactions will be considered in the EDA and model selection.\newline
+Model :\newline 
+$$recordtype = \beta0\times	Cprevious+\beta1\times	durationprevious+\beta2\times	(1|plan)+ \epsilon$$
+\vspace{3mm}
+
+\textbf{\Large{2.2-Data Manipulation}}
+\vspace{5mm}
+
+Because the train set contains over 660 thousands of observations, so it would be convenient to sort them out at first. I create 3 new dataset \textbf{trainpur}:contains purchased options,\textbf{trainshop}:shopping points (no purchased options) and\textbf{trainlast}:last quote before purchased.
+```{r}
+setwd("/Users/shijiecai/Desktop/684 project")
+test<-read.csv("/Users/shijiecai/Desktop/684 project/test_v2.csv")
+train<-read.csv("/Users/shijiecai/Desktop/684 project/train.csv")
+test$plan <- paste0(test$A, test$B, test$C, test$D, test$E, test$F, test$G)
+train$plan <- paste0(train$A, train$B, train$C, train$D, train$E, train$F, train$G)
+## In order to predict the right plan was purchased, I extract the datasets contain only purchase point, last quote before purchase and without purchase.
+trainpur <- train[(train$record_type=="1"),]## only purchase
+trainshop <- train[duplicated(train$customer_ID, fromLast=TRUE), ] ## only shopping point not purchase point
+trainlast <- trainshop[!duplicated(trainshop$customer_ID, fromLast=TRUE), ]## last quote
+
+## Next I label if the last quote and the real porchased plan are the same or not.
+changed <- ifelse(trainpur$plan == trainlast$plan, "No", "Yes")
+
+trainlast$changed <- as.factor(changed)
+```
+
+\vspace{5mm}
+\textbf{\LARGE{3. Exploratory Data Analysis (EDA)}}
+\vspace{5mm}
+```{r}
+sapply(train, function(x) mean(is.na(x)))
+sapply(test, function(x) mean(is.na(x)))
+## I have lots of NAs in risk factor for both datasets. 
+```
+\vspace{3mm}
+Here I did some NA analysis, suprisingly found 36% and 37% of NAs in risk_factor. Treating them differently could bring up different results because there are too much if it, so my way is to treat NAs as 5 which means the highest rank of risk.
+\vspace{5mm}
+
+```{r}
+#visualization of shopping points
+p1<-ggplot(test, aes(shopping_pt))+geom_bar() +labs(x="Number of Shopping Points", y="Frequency", title="Figure 3.1:Shopping Points of test" )
+
+p2<-ggplot(train, aes(shopping_pt))+geom_bar() +labs(x="Number of Shopping Points", y="Frequency", title="Figure 3.1:Shopping Points of train" )
+
+
+grid.arrange(p1, p2)
+```
+\vspace{3mm}
+Figure 3.1 shows that these test sets are apparently be truncated, but the distributions are similar so maybe we can use test dataset to so this project. However, we are missing the purchasing point in the test set which shows the final option the customers purchase. So I decided to use train dataset to proceed with my analysis.
+\vspace{3mm}
+
+```{r}
+library(corrplot)
+train1<-mutate(train,agediff=age_oldest-age_youngest)
+train1<-na.omit(train1)
+train1<-train1[,-13:-14]
+train1<-train1[,-16:-22]
+train1$C_previous<-as.factor(train1$C_previous)
+train.num<-select(train1,group_size,car_age,risk_factor,duration_previous,cost,agediff)
+M <- cor(train.num)
+corrplot(M, method = "number", title = "Figure 3.2 : Correlation of all numerical variables")
+## Here is the correlation plot of all numerical variables
+```
+\vspace{3mm}
+In figure 3.2, I show all the correlation between each numerical variable. There is no significant correlations need to be considered.
+
+\vspace{3mm}
+
+```{r}
+changed.c <- ifelse(trainpur$C_previous == trainpur$C, "No", "Yes")
+trainpur2<-trainpur
+trainpur2$changed.c <- as.factor(changed.c)
+g<-ggplot(trainpur2, aes(changed.c))
+g<-g + geom_bar()
+g<-g + ggtitle("Figure 3.3:Number of customers change option C when purchasing")
+g
+```
+\vspace{3mm}
+Figure 3.3 shows about 70% of customers choose to use the same option C when they purchasing the new insurance. So it seems like C_previous has some influence on the new options, so I decided to find out what is the relationship between C-previous and all the other options.
+\vspace{3mm}
+
+```{r}
+train.c<-select(trainpur2, C_previous,A,B,C,D,E,F,G)
+train.c<-na.omit(train.c)
+M <- cor(train.c)
+corrplot(M, method = "number", title = "Figure 3.4 : Correlation of C.previous with other options")
+```
+\vspace{3mm}
+From above figure, I found that C_previous has some of influence on other options, like C ,D and F. And because of I treated the combination of option A~G as vectors and called "plan" as a new variable, even though C_previous may correlate with C, however, when considering option A~G as a whole, .
+\vspace{3mm}
+
+```{r}
+boxplot(duration_previous ~ C_previous, data = trainpur, ylab = "Previous Duration")
+```
+\vspace{3mm}
+
+It seems like duration_previous and C_previous have some relationship. Maybe there is an interaction between them. (However, I couldn't fit the model with interaction of duration_previous and C_previous.)
+
+\vspace{3mm}
+```{r}
+## In order to predict the right plan was purchased, I extract the datasets contain only purchase point, last quote before purchase and without purchase.
+trainpur <- train[(train$record_type=="1"),]## only purchase
+trainshop <- train[duplicated(train$customer_ID, fromLast=TRUE), ] ## only shopping point not purchase point
+trainlast <- trainshop[!duplicated(trainshop$customer_ID, fromLast=TRUE), ]## last quote
+
+## Next I label if the last quote and the real porchased plan are the same or not.
+changed <- ifelse(trainpur$plan == trainlast$plan, "No", "Yes")
+trainlast$changed <- as.factor(changed)
+trainpur$changed <- as.factor(changed)
+
+## Creating a new dataset with accuracy.
+
+lastpre<- split(trainlast, trainlast$shopping_pt)
+
+lastpre1 <- sapply(lastpre, function(x) sum(x$changed=="No")/nrow(x))
+lastpre2 <- sapply(lastpre, nrow)
+accuracy <- data.frame(numshoppoints=as.integer(names(lastpre1)),accuracy=lastpre1,Observations=lastpre2)
+
+ggplot(accuracy) + aes(numshoppoints, accuracy, size=Observations) +geom_point() + geom_line(size=0.5) + labs(x="Number of ShoppingPoints", y="Prediction Accuracy", title="Figure 3.5 :Prediction accuracy by last quote")
+```
+Figure 3.5 shows that prediction accuracy seems good when using the last quote before purchase. With higher shopping points the more accuracy obtained, except for shopping points at 12 occurs a huge jump.
+
+\vspace{5mm}
+\textbf{\LARGE{4. Model Selection}}\newline
+\vspace{5mm}
+Below is the model I choose at last (after comparing with the other one, which is in the appendix).Response is binary and with 3 explanatary variables each of them is a factor, numeric and random variable.
+
+```{r}
+sample<-rbind(trainlast,trainpur)
+sample<-na.omit(sample)
+set.seed(7)
+mysample <- sample[sample(1:nrow(sample), 5000,replace=FALSE),]# randomly select 5000 observations from sample set.
+mysample$plan<-as.factor(mysample$plan)
+mysample$C_previous<-as.factor(mysample$C_previous)
+
+
+m1 <- glmer(record_type ~C_previous + duration_previous  +(1 | plan), data = mysample, family = binomial, control = glmerControl(optimizer = "bobyqa"),nAGQ = 10)
+print(m1, corr = FALSE)
+```
+The first part tells us the estimates are based on an adaptive Gaussian Hermite approximation of the likelihood. In particular we used 10 integration points. As we use more integration points, the approximation becomes more accurate converging to the ML estimates.\newline
+The next section gives us basic information that can be used to compare models, followed by the random effect estimates. This represents the estimated variability in the intercept on the logit scale. Approximately one-thrid of the plans are covered and the std of random effect is low.
+
+\vspace{3mm}
+\textbf{\LARGE{4.1 Simple Interpretation}}
+```{r}
+se <- sqrt(diag(vcov(m1))) # table of estimates with 95% CI
+tab <- cbind(Est = fixef(m1), LL = fixef(m1) - 1.96 * se, UL = fixef(m1) + 1.96 *se)
+print(exp(tab)) # odds ratio of outcomes
+```
+\vspace{3mm}
+Here is the 95% CI of coefficients of exponential scale. So, holding all else constant a person who has option 4 on C_previous is most likely to purchase comparing to C_previous 1, duration_previous has positive influence on the purchasing as well, but the effect is so little, it would only increase 0.3% with a year increasing. Overall speaking, C_previous has posive effect on purchasing except for C_previous 1, since I do not have more information on the details of each option, I do not know the reason behind it but C_previous and duration_previous have positive effect on the purchasing prediction.
+
+\vspace{3mm}
+```{r}
+# Let's do some predictions
+tmpdat <- mysample[, c("C_previous", "duration_previous", "plan")]
+# I am interested in the variable duration_previous
+jvalues <- with(mysample, seq(from = min(duration_previous), to = max(duration_previous), length.out = 100))
+
+pp <- lapply(jvalues, function(j) {
+    tmpdat$duration_previous <- j
+    predict(m1, newdata = tmpdat, type = "response")
+})
+
+# get the means with lower and upper quartiles
+plotdat <- t(sapply(pp, function(x) {
+    c(M = mean(x), quantile(x, c(0.25, 0.75)))
+}))
+# add in duration previous values and convert to data frame
+plotdat <- as.data.frame(cbind(plotdat, jvalues))
+# better names and show the first few rows
+colnames(plotdat) <- c("PredictedProbability", "Lower", "Upper", "duration_previous")
+ggplot(plotdat, aes(x = duration_previous, y = PredictedProbability)) + geom_linerange(aes(ymin = Lower,ymax = Upper)) + geom_line(size = 0.5) + ylim(c(0, 1))
+```
+\vspace{3mm}
+
+Prediction probability slighlt goes up as duration_previous increase but still around 50%, variation is so small which can be ignored here. So my next step is to add C_previous into the prediction to see within 4 levels of C_previous how the predicted probability goes.
+
+\vspace{3mm}
+```{r}
+# Next I will add C_previous to the prediction
+biprobs <- lapply(levels(mysample$C_previous), function(stage) {
+  tmpdat$C_previous[] <- stage
+  lapply(jvalues, function(j) {
+    tmpdat$LengthofStay <- j
+    predict(m1, newdata = tmpdat, type = "response")
+  })
+})
+
+# get means and quartiles for all jvalues for each level of C_previous
+plotdat2 <- lapply(biprobs, function(X) {
+  temp <- t(sapply(X, function(x) {
+    c(M=mean(x), quantile(x, c(.25, .75)))
+  }))
+  temp <- as.data.frame(cbind(temp, jvalues))
+  colnames(temp) <- c("PredictedProbability", "Lower", "Upper", "duration_previous")
+  return(temp)
+})
+
+# collapse to one data frame
+plotdat2 <- do.call(rbind, plotdat2)
+
+# add C_previous 
+plotdat2$C_previous <- factor(rep(levels(mysample$C_previous), each = length(jvalues)))
+
+ggplot(plotdat2, aes(x = duration_previous, y = PredictedProbability)) +
+  geom_ribbon(aes(ymin = Lower, ymax = Upper, fill = C_previous), alpha = .15) +
+  geom_line(aes(colour = C_previous), size = 0.5) +
+  ylim(c(0, 1)) + facet_wrap(~  C_previous)
+
+```
+\vspace{3mm}
+There is no big difference in each level of C_previous. 3 is slightly higher than others which also matches the result from EDA. But other than that, prediction probability is still around 50% for all 4 levels. 
+\vspace{3mm}\newline
+
+\vspace{5mm}
+\textbf{\LARGE{5. Result}}\newline
+\vspace{5mm}
+My final model is glmer(record_type ~C_previous + duration_previous  +(1 | plan)). The prediction is a bit little over 50%, I think the problem is in the mysample dataset: customers who purchase the plan and don't are about 50 to 50 and it is because of my understanding for this dataset is to treat it like a sales data for my analysis. So my suggestion is that if there is a more complete sales information on insurance plans maybe I perform a better outcome.
+
+\vspace{5mm}
+\textbf{\LARGE{6. Appendix (model comparison)}}
+\vspace{5mm}
+
+```{r}
+# Extend the model to allow for varying slopes for the time predictor and compare these two models.
+m2 <- glmer(record_type ~C_previous + duration_previous  +(1 + duration_previous | plan), data = mysample, family = binomial, control = glmerControl(optimizer = "bobyqa"))
+print(m2, corr = FALSE)
+# Using ANOVA to compare.
+anova(m1, m2)
+```
+By comparing ANOVA of m1 and m2: even though the p-value is greater than 0.05, then AIC and BIC of m1 are better than those of m2, so my conclusion is that m1 fits better than m2. So in the above I use m1 to continou my analysis.
+
+```{r}
+g1<-ggplot(mysample, aes(fitted.values(m1),resid(m1), )) + geom_point()
+g1 <- g1 + ylab("residuals") + xlab("fitted value")
+g1 <- g1 + labs(title="Residual Plot of m1")
+
+g2<-ggplot(mysample, aes(fitted.values(m2),resid(m2), )) + geom_point()
+g2 <- g2 + ylab("residuals") + xlab("fitted value")
+g2 <- g2 + labs(title="Residual Plot of m2")
+
+grid.arrange(g1, g2)
+```
+
+
+We can not see much difference of these 2 residual plots which indicates that time duration is not very interacting with the plan and maybe adding a indicating line would be better.
+
+
+```{r}
+g1.1<-ggplot(mysample, aes(fitted.values(m1),resid(m1), )) + geom_point()
+g1.1 <- g1.1 + ylab("residuals") + xlab("fitted value")
+g1.1 <- g1.1+geom_abline()
+g1.1 <- g1.1 + labs(title="Residual Plot of m1")
+g1.1
+
+g2.1<-ggplot(mysample, aes(fitted.values(m2),resid(m2), )) + geom_point()
+g2.1 <- g2.1 + ylab("residuals") + xlab("fitted value")
+g2.1 <- g2.1+geom_abline()
+g2.1 <- g2.1 + labs(title="Residual Plot of m2")
+g2.1
+
+```
+
+Slope for m2 is slightly higher than m1 which indicates m1 is a better fitted model and this conclusion matches the same as the anova test. This is the reason why I choose m1 to fit the model and do the prediction.
